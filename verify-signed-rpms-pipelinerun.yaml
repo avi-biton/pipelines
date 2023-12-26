@@ -1,0 +1,122 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: verify-signed-rpms-and-check-output
+  namespace: pipe
+spec:
+  params: 
+  - name: IMAGE
+    value: quay.io/redhat-user-workloads/rhtap-o11y-tenant/tools/tools:72beb048597a0d19f64a3ef0433e0b6d2098164c
+  - name: INPUT 
+    value: quay.io/abiton1/ansible-automation-platform-2-next-eda-controller-rhel8:latest
+  - name: FAIL_UNSIGNED
+    value: true
+  pipelineSpec:
+    params:
+      - name: IMAGE
+        type: string
+      - name: INPUT 
+        type: string
+      - name: FAIL_UNSIGNED
+        type: string
+    tasks:
+      - name: verify-signed-rpms
+        params:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: INPUT
+          value: $(params.INPUT)
+        - name: FAIL_UNSIGNED
+          value: $(params.FAIL_UNSIGNED)
+        taskSpec:
+          params:
+            - name: IMAGE
+              type: string
+              description: The image to use for this task
+              default: ""
+            - name: INPUT
+              type: string
+              description: "AppStudio snapshot or a reference to a container image"
+            - name: FAIL_UNSIGNED
+              type: string
+              description: "[true | false] If true fail if unsigned RPMs were found"
+              default: ""
+            - name: WORKDIR
+              type: string
+              default: /tmp
+              description: |
+                Directory that will be used for storing temporary
+                files produced by this task.
+          results:
+            - name: verification-output
+              description: script output
+            - name: exit-code
+              description: exit code
+          volumes:
+            - name: workdir
+              emptyDir: {}
+          steps:
+            - name: verify-signed-rpms
+              onError: continue
+              image: "$(params.IMAGE)"
+              volumeMounts:
+                - name: workdir
+                  mountPath: "$(params.WORKDIR)"
+              script: |
+                #!/bin/bash
+                set -ex
+                set -o pipefail
+
+                rpm_verifier \
+                  --input "$(params.INPUT)" \
+                  --fail-unsigned "$(params.FAIL_UNSIGNED)" \
+                  --workdir "$(params.WORKDIR)" 2>&1 | tee $(results.verification-output.path)
+                  
+            - name: extract-exit-code
+              image: "$(params.IMAGE)"
+              script: |
+                #!/bin/bash
+                set -ex
+
+                cat "$(steps.step-verify-signed-rpms.exitCode.path)" | tee $(results.exit-code.path)
+                             
+      - name: verify-output-and-exit-code
+        runAfter:
+          - verify-signed-rpms
+        params:
+          - name: IMAGE
+            value: $(params.IMAGE)
+          - name: exit-code
+            value: $(tasks.verify-signed-rpms.results.exit-code)
+          - name: verify-signed-rpms-output
+            value: $(tasks.verify-signed-rpms.results.verification-output)
+        taskSpec:
+          params:
+            - name: IMAGE
+              type: string
+              description: The image to use for this task
+              default: ""
+            - name: exit-code
+              type: string
+            - name: verify-signed-rpms-output
+              type: string
+          steps:
+            - name: verify-output-and-exit-code
+              image: "$(params.IMAGE)"
+              script: |
+                #!/bin/bash
+                set -e
+              
+                output="$(params.verify-signed-rpms-output)"
+                exit_code="$(params.exit-code)"
+                echo "verify-signed-rpms output is:"
+                echo "$output"
+                echo "verify-signed-rpms exit code is:"
+                echo "$exit_code"
+
+                if [ "$exit_code" == "1" ] && [[ "$output" == *"ansible-automation-platform-common-2.4-1.el8ap"* ]]; then
+                  echo "Output and exit code matches!"
+                else
+                  echo "Output or exit code do not match"
+                  exit 1
+                fi
